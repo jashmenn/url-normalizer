@@ -8,5 +8,5 @@
                    [commons-logging
                     commons-codec]]]
   :dev-dependencies
-    [[autodoc "0.7.1"]
-     [swank-clojure "1.2.1"]])
+    [[swank-clojure "1.2.1"]]
+  :aot [url-normalizer.core])
