@@ -9,8 +9,10 @@
     [clojure.contrib.str-utils2 :as su])
   (:import
     [java.net URL URI URISyntaxException MalformedURLException]
-    [org.apache.http HttpHost]
-    [org.apache.http.client.utils URIUtils]))
+    [org.apache.http.client.utils URIUtils])
+  (:gen-class
+    :name url_normalizer.URLNormalizer
+    :methods [#^{:static true} [normalize [String] java.net.URI]]))
 
 (defn as-url
   ([arg]
@@ -162,6 +164,11 @@
         (URI. scheme (.getSchemeSpecificPart #^URI uri) fragment)
         (URI. scheme user-info host (if (nil? port) -1 port) path query
               fragment)))))
+
+(defn -normalize 
+  "A Java-callable wrapper around normalize"
+  [arg]
+  (normalize arg))
 
 (defn equivalent?
   "Returns true if the two URIs are equivalent when normalized.
