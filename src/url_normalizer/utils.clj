@@ -1,9 +1,11 @@
 (ns url-normalizer.utils
   "Utilities and specific normalizations."
   (:require
-    [clojure.contrib.str-utils2 :as su])
+    [clojure.string :as s])
+  (:use
+    [flatland.ordered.map])
   (:import
-    [java.net URI]))
+    [java.net InetAddress URI URLEncoder]))
 
 (defn- byte-to-hex-string
   "Converts the lower 16 bits of b to into a hex string."
@@ -29,7 +31,7 @@
   ^{:doc "Maps percent encoded octets to alpha characters."}
   alpha
   (let [xs (concat (range 0x41 (inc 0x5A)) (range 0x61 (inc 0x7A)))]
-    (zipmap (map #(str "%" (su/upper-case (byte-to-hex-string %))) xs)
+    (zipmap (map #(str "%" (s/upper-case (byte-to-hex-string %))) xs)
             (map #(str (char %)) xs))))
 
 (def
@@ -42,7 +44,7 @@
 (def
   ^{:doc
     "A mapping of encoded unreserved characters to their decoded
-    counterparts"}
+    counterparts."}
   unreserved
   (assoc
     (merge alpha digits)
@@ -50,6 +52,14 @@
     "%2E" "."
     "%5F" "_"
     "%7E" "~"))
+
+(def
+  ^{:doc
+    "A mapping of encoded reserved characters to their decoded
+    counterparts."}
+  reserved
+  (let [cs (map str ":/?#[]@!$&'()*+,;=")]
+    (zipmap (map #(URLEncoder/encode %) cs) cs)))
 
 (def
   ^{:doc "A list of functions that decode alphanumerics in a String."}
@@ -78,7 +88,7 @@
   HTTP://example.com -> http://example.com"
   [scheme ctx]
   (if (:lower-case-scheme? ctx)
-    (su/lower-case scheme)
+    (s/lower-case scheme)
     scheme))
 
 (defn force-http
@@ -96,9 +106,9 @@
   http://www.example.com/ -> http://example.com/
   http://www.foo.bar.example.com/ -> http://www.foo.bar.example.com/
   http://www2.example.com/ -> http://www2.example.com/"
-  [host ctx]
-  (if (:remove-www? ctx)
-    (throw (UnsupportedOperationException.))
+  [^String host ctx]
+  (if (and (:remove-www? ctx) (.startsWith host "www."))
+    (.substring host 4 (count host))
     host))
 
 (defn lower-case-host
@@ -107,7 +117,7 @@
   http://ExAmpLe.com -> http://example.com"
   [host ctx]
   (if (:lower-case-host? ctx)
-    (su/lower-case host)
+    (s/lower-case host)
     host))
 
 (defn remove-ip
@@ -116,7 +126,7 @@
   http://192.0.32.10 -> http://example.com"
   [host ctx]
   (if (:remove-ip? ctx)
-    (throw (UnsupportedOperationException.))
+    (.getHostName (InetAddress/getByName host))
     host))
 
 (defn remove-empty-user-info
@@ -125,9 +135,8 @@
   http://@example.com -> http://example.com
   http://:@example.com -> http://example.com"
   [user-info ctx]
-  (if (and (:remove-empty-user-info? ctx)
-           (or (= ":" user-info) (= "" user-info)))
-    nil
+  (if-not (and (:remove-empty-user-info? ctx)
+               (or (= ":" user-info) (= "" user-info)))
     user-info))
 
 (defn remove-trailing-dot-in-host
@@ -146,18 +155,9 @@
   http://example.com:80 -> http://example.com
   http://example.com:8080 -> http://example.com/"
   [scheme port ctx]
-  (if (and (:remove-default-port? ctx)
-           (= port (get default-port scheme)))
-    nil
+  (if-not (and (:remove-default-port? ctx)
+               (= port (get default-port (s/lower-case scheme))))
     port))
-
-; TODO: Roll me into normalize-percent-encoding
-(defn decode-special-characters
-  [text ctx]
-  "An unsafe normalization that decodes special characters"
-  (if (:decode-special-characters? ctx)
-    (throw (UnsupportedOperationException.))
-    text))
 
 (defn normalize-percent-encoding
   "Applies several percent encoding normalizations.
@@ -166,32 +166,42 @@
   http://example.com/%7ejane -> http://example.com/%7Ejane
 
   decode-unreserved-characters:
-  http://example.com/%7ejane -> http://example.com~/jane"
+  http://example.com/%7ejane -> http://example.com~/jane
+
+  decode-reserved-characters:
+  http://example.com//%3Ffoo%3Dbar%26bif%3Dbaz -> http://example.com/?foo=bar&bif=baz"
   [#^String text ctx]
-  (if (:upper-case-percent-encoding? ctx)
-    (loop [sb (StringBuilder.)
-           m (re-matcher #"%[a-fA-F0-9]{2}" text)
-           k 0]
-      (if (nil? (re-find m))
-        (do
-          (.append sb (.substring text k))
-          (.toString sb))
-        (let [g (-> m (.group 0) (.toUpperCase))]
-          (.append sb (.substring text k (.start m)))
-          (if (and (:decode-unreserved-characters? ctx)
-                   (contains? unreserved g))
-            (.append sb (get unreserved g))
-            (.append sb g))
-          (recur sb m (.end m)))))
-    text))
+  (loop [sb (StringBuilder.)
+         m (re-matcher #"%[a-fA-F0-9]{2}" text)
+         k 0]
+    (if (nil? (re-find m))
+      (do
+        (.append sb (.substring text k))
+        (.toString sb))
+      (let [g (.group m 0)
+            t (.toUpperCase g)]
+        (.append sb (.substring text k (.start m)))
+        (cond
+          (and (:decode-unreserved-characters? ctx)
+               (contains? unreserved t))
+            (.append sb (get unreserved t))
+          (and (:decode-reserved-characters? ctx)
+               (contains? reserved t))
+            (.append sb (get reserved t))
+          :default
+            (if (:upper-case-percent-encoding? ctx)
+              (.append sb t)
+              (.append sb g)))
+        (recur sb m (.end m))))))
 
-(defn remove-duplicate-slashes
-  "An unsafe normalization that removes duplicate slashes in a path:
+(defn remove-directory-index
+  "An unsafe normalization that removes the directory index from the path.
 
-  http://example.com/foo//bar/ -> http://example.com/foo/bar"
+  http://www.example.com/index.php -> http://www.example.com/"
   [path ctx]
-  (if (:remove-duplicate-slashes? ctx)
-    (throw (UnsupportedOperationException.))
+  (if (and (:remove-directory-index? ctx)
+           (re-matches #"/index\.[^/]+" path))
+    "/"
     path))
 
 (defn add-trailing-slash
@@ -207,8 +217,11 @@
 
   http://example.com/?foo&foo=bar -> http://example.com/?foo=bar"
   [query ctx]
-  (if (:remove-duplicate-query-keys? ctx)
-    (throw (UnsupportedOperationException.))
+  (if (and (:remove-duplicate-query-keys? ctx)
+           (not (s/blank? query)))
+    (let [entries (map #(s/split % #"=") (s/split query #"&"))
+          query-map (into (ordered-map) entries)]
+      (s/join "&" (map #(s/join "=" %) query-map)))
     query))
 
 (defn sort-query-keys
@@ -217,7 +230,10 @@
   http://example.com/?c&a&b -> http://example.com/a&b&c"
   [query ctx]
   (if (:sort-query-keys? ctx)
-    (throw (UnsupportedOperationException.))
+    ((comp #(s/join "&" %)
+           sort
+           #(s/split % #"&"))
+       query)
     query))
 
 (defn remove-empty-query
@@ -226,16 +242,32 @@
   http://example.com/? -> http://example.com/
   http://example.com? -> http://example.com"
   [query ctx]
-  (if (and (:remove-empty-query? ctx) (= query ""))
-    nil
+  (if-not (and (:remove-empty-query? ctx) (= query ""))
+    query))
+
+(defn remove-query
+  "An unsafe normalization that removes entire query:
+
+  http://example.com/?foo=bar -> http://example.com/
+  http://example.com? -> http://example.com"
+  [query ctx]
+  (if-not (:remove-query? ctx)
     query))
 
 (defn remove-fragment
   "An unsafe normalization that removes the fragment.  The URI will still refer
   to the same resource so sometimes the fragment is not needed:
 
-  http://example.com/#foo -> http://example.com/"
-  [fragment ctx]
-  (if (:remove-fragment? ctx)
-    nil
-    fragment))
+  remove-fragment:
+  http://example.com/#foo -> http://example.com/
+
+  remove-fragment and keep-hashbang-fragment:
+  http://twitter.com/#foo -> http://twitter.com/#foo
+  http://twitter.com/#!/user -> http://twitter.com/#!/user
+
+  See <http://code.google.com/web/ajaxcrawling/docs/getting-started.html>
+  See <http://www.tbray.org/ongoing/When/201x/2011/02/09/Hash-Blecch>"
+  [^String fragment ctx]
+  (let [keep? (and (:keep-hashbang-fragment? ctx) (.startsWith fragment "!"))]
+    (if-not (and (:remove-fragment? ctx) (not keep?))
+      fragment)))

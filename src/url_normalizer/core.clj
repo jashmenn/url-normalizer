@@ -2,17 +2,13 @@
   "A Clojure library for normalizing urls with configurable aggressiveness."
   (:refer-clojure :exclude (resolve))
   (:use
-    [clojure.contrib.def]
     [url-normalizer.utils])
   (:require
-    [clojure.contrib.io :as io]
-    [clojure.contrib.str-utils2 :as su])
+    [clojure.java.io :as io])
   (:import
     [java.net URL URI URISyntaxException MalformedURLException]
-    [org.apache.http.client.utils URIUtils])
-  (:gen-class
-    :name url_normalizer.URLNormalizer
-    :methods [#^{:static true} [normalize [String] java.net.URI]]))
+    [org.apache.abdera.i18n.iri IDNA]
+    [org.apache.http.client.utils URIUtils]))
 
 (defn as-url
   ([arg]
@@ -37,47 +33,44 @@
     (URI. arg)
     (catch URISyntaxException e (as-uri (URL. arg)))))
 
-(defvar-
-  ^{:doc
-   "These are safe normalizations that will not change the semantics of a URI.
-   See the #'url-normalizer.util namespace for additional details and
-   implementations."}
-  safe-normalizations
+(def safe-normalizations
+  ^{:doc "These are safe normalizations that will not change the semantics of a
+         URI. See the #'url-normalizer.utils namespace for additional details
+         and implementations."
+    :private true}
   {:lower-case-scheme? true
    :lower-case-host? true
    :upper-case-percent-encoding? true
    :decode-unreserved-characters? true
-   ; TODO: Re-insert when this is do-able
-   ;:encode-illegal-characters? true
    :add-trailing-slash? true
    :remove-default-port? true
    :remove-dot-segments? true})
 
-; TODO: Implement the commented out functionality
-(defvar-
-  ^{:doc
-    "These are unsafe normalizations that can either change the semantics of
-    the URI or cause it to refer to a different resource.  See the
-    #'url-normalizer.util namespace for additional details and
-    implementations."}
-  unsafe-normalizations
-  {;:remove-directory-index? false
+(def unsafe-normalizations
+  ^{:doc "These are unsafe normalizations that can either change the semantics
+         of the URI or cause it to refer to a different resource.  See the
+         #'url-normalizer.utils namespace for additional details and
+         implementations."
+    :private true}
+  {:remove-directory-index? false
    :remove-fragment? false
-   ;:remove-ip? false
-   ;:remove-duplicate-slash? false
-   ;:remove-duplicate-query-keys? false
+   :remove-ip? false
+   :remove-duplicate-query-keys? false
    :remove-empty-query? false
+   :remove-query? false
    :remove-empty-user-info? false
    :remove-trailing-dot-in-host? false
+   :keep-hashbang-fragment? false
    :force-http? false
-   :remove-www? false})
-   ;:sort-query-keys? false
-   ;:decode-special-characters? false})
+   :remove-www? false
+   :sort-query-keys? false
+   :decode-reserved-characters? false})
 
 (def
   ^{:doc
     "A normalization context. See #'url-normalizer/*safe-normalizations* and
-     #'url-normalizer/*unsafe-normalizations* for possible normalizations."}
+     #'url-normalizer/*unsafe-normalizations* for possible normalizations."
+    :dynamic true}
   *context*
   (merge safe-normalizations unsafe-normalizations))
 
@@ -92,12 +85,21 @@
     (remove-empty-user-info user-info ctx)))
 
 (defn- normalize-host-part [#^URI uri ctx]
-  (if-let [host (.getHost uri)]
-    ((comp #(remove-www % ctx)
-           #(remove-trailing-dot-in-host % ctx)
-           #(remove-ip % ctx)
-           #(lower-case-host % ctx))
-       host)))
+  (let [host (.getHost uri)
+        authority (.getAuthority uri)]
+    (cond
+      (not (nil? host))
+        ((comp #(remove-www % ctx)
+               #(remove-trailing-dot-in-host % ctx)
+               #(remove-ip % ctx)
+               #(lower-case-host % ctx))
+           host)
+      (and (not (nil? authority))
+           (or (-> uri (.getScheme) (.equalsIgnoreCase "http"))
+               (-> uri (.getScheme) (.equalsIgnoreCase "https"))))
+        (IDNA/toASCII authority)
+      :default
+        nil)))
 
 (defn normalize-port-part [#^URI uri ctx]
   (let [scheme (.getScheme uri)
@@ -108,18 +110,16 @@
 (defn normalize-path-part [#^URI uri ctx]
   (if-let [path (get-path uri ctx)]
     ((comp #(add-trailing-slash % ctx)
-           ; TODO: Re-add this fn because right now, it doesn't
-           ; even work.
-           ;#(remove-duplicate-slashes % ctx)
+           #(remove-directory-index % ctx)
            #(normalize-percent-encoding % ctx))
        path)))
 
 (defn- normalize-query-part [#^URI uri ctx]
   (if-let [query (get-query uri ctx)]
-    ((comp #(remove-empty-query % ctx)
-           ; TODO: Add these in when they work
-           ;#(remove-duplicate-query-keys % ctx)
-           ;#(sort-query-keys % ctx)
+    ((comp #(remove-query % ctx)
+           #(remove-empty-query % ctx)
+           #(remove-duplicate-query-keys % ctx)
+           #(sort-query-keys % ctx)
            #(normalize-percent-encoding % ctx))
        query)))
 
@@ -199,33 +199,3 @@
   [context f]
   (binding [*context* context]
     (f)))
-
-(defn to-uri
-  "DEPRECATED: Prefer as-uri."
-  {:deprecated "0.1.0"}
-  [arg]
-  (as-uri arg))
-
-(defn to-url
-  "DEPRECATED: Prefer as-url."
-  {:deprecated "0.1.0"}
-  [arg]
-  (io/as-url arg))
-
-(defn canonicalize-url
-  "DEPRECATED: Prefer normalize."
-  {:deprecated "0.1.0"}
-  [arg]
-  (try
-    (.toASCIIString
-      #^URI (normalize arg {:remove-empty-user-info? true
-                            :remove-fragment? true
-                            :remove-trailing-dot-in-host? true}))
-    (catch URISyntaxException e (canonicalize-url (to-uri arg)))
-    (catch MalformedURLException e (canonicalize-url (to-url arg)))))
-
-(defn url-equal?
-  "DEPRECATED: Prefer equivalent?"
-  {:deprecated "0.1.0"}
-  [a b]
-  (= (canonicalize-url a) (canonicalize-url b)))

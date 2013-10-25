@@ -1,8 +1,8 @@
-(ns url-normalizer.test.core
+(ns url-normalizer.core-test
   (:refer-clojure :exclude (resolve))
   (:use
     [url-normalizer.core]
-    [url-normalizer.test.utils]
+    [url-normalizer.test]
     [clojure.test])
   (:import
     [java.net URL URI]))
@@ -90,8 +90,8 @@
      "http://example.com/?q=%E2%85%A0" "http://example.com/?q=%E2%85%A0"
      "http://example.com/?q=%5c" "http://example.com/?q=%5C"
      "http://example.com/?q=%5C" "http://example.com/?q=%5C"
-     ;"http://example.com/?q=%C7" "http://example.com?q=�"
-     ;"http://example.com/?q=C%CC%A7" "http://example.com/?q=Ç"
+     "http://example.com?q=�" "http://example.com/?q=%C7"
+     "http://example.com/?q=Ç" "http://example.com/?q=C%CC%A7"
      "http://example.com/a/../a/b" "http://example.com/a/b"
      "http://example.com/a/./b" "http://example.com/a/b"
      "http://example.com:80/" "http://example.com/"
@@ -128,17 +128,6 @@
     "Tests from RFC1808 and MNot's urlnorm.py.  These tests drop the fragment and
     remove the trailing dot in the host.
 
-    These tests give different output from Java's URI class, which follows RFC2396.
-    For example:
-
-      /../foo -> /../foo
-
-    But in the these tests, they normalize to:
-
-      /../foo -> /foo
-
-    Following Java's URI class, I've commented out the failing tests.
-
     See <http://www.ietf.org/rfc/rfc1808.txt>
     See <http://www.mnot.net/python/urlnorm.py>"}
   rfc1808-tests
@@ -151,15 +140,11 @@
      "/foo/bar/../.." "/"
      "/foo/bar/../../" "/"
      "/foo/bar/../../baz" "/baz"
-     ;"/foo/bar/../../../baz" "/baz"
-     ;"/foo/bar/../../../../baz" "/baz"
      "/./foo" "/foo"
-     ;"/../foo" "/foo"
      "/foo." "/foo."
      "/.foo" "/.foo"
      "/foo.." "/foo.."
      "/..foo" "/..foo"
-     ;"/./../foo" "/foo"
      "/./foo/." "/foo/"
      "/foo/./bar" "/foo/bar"
      "/foo/../bar" "/bar"
@@ -180,6 +165,26 @@
      "-" "-"
      "http://www.foo.com/?p=529&#038;cpage=1#comment-783" "http://www.foo.com/?p=529&"}))
 
+(def
+  ^{:doc
+    "These MNot tests give different output from Java's URI class, which follows
+    RFC2396.  For example:
+
+      /../foo -> /../foo
+
+    But in the these tests, they normalize to:
+
+      /../foo -> /foo
+
+    Currently, they are failing.  I'll re-enable them once I figure out who is
+    right."}
+  rfc1808-failing-tests
+  (as-uri-map
+    {"/foo/bar/../../../baz" "/baz"
+     "/foo/bar/../../../../baz" "/baz"
+     "/../foo" "/foo"
+     "/./../foo" "/foo"}))
+
 (deftest test-reference-resolution
   (let [base (as-uri "http://a/b/c/d;p?q")]
     (doseq [[original resolved] rfc3986-normal-tests]
@@ -192,17 +197,20 @@
 
 (deftest test-pace
   (doseq [[a b] pace-tests]
-    (is (url-equal? a b))
     (is (equivalent? a b {:remove-empty-user-info? true}))))
 
 (deftest test-rfc2396bis
   (doseq [[a b] rfc2396bis-tests]
-    (is (url-equal? a b))
     (is (equivalent? a b))))
 
 (deftest test-rfc1808
   (doseq [[a b] rfc1808-tests]
-    (is (url-equal? a b))
+    (is (equivalent? a b {:remove-fragment? true
+                          :remove-trailing-dot-in-host? true}))))
+
+(deftest ^{:failing true} test-rfc1808-failing
+  (doseq [[a b] rfc1808-failing-tests]
+    (is (equal? a b))
     (is (equivalent? a b {:remove-fragment? true
                           :remove-trailing-dot-in-host? true}))))
 
@@ -210,21 +218,52 @@
   (is (equal? (normalize "http://www.foo.com/?p=529&#038;cpage=1#comment-783")
               (as-uri "http://www.foo.com/?p=529&#038;cpage=1%23comment-783")))
   (is (equal? (normalize "http://example.com//??##")
-              (as-uri "http://example.com/??#%23"))))
+              (as-uri "http://example.com/??#%23")))
+  (is (equal? (normalize "http://例え.テスト/")
+              (as-uri "http://xn--r8jz45g.xn--zckzah/"))))
 
 (deftest
-  ^{:doc "See <http://bugs.sun.com/bugdatabase/view_bug.do?bug_id=4708535>"}
+  ^{:doc
+    "There is a bug with URI resolution in the Java URI class.  Making use
+    of the URI class in conjunction with the Apache HttpComponents library's
+    resolve function fixes the problem.  However, the single argument
+    constructor to URI cannot handle unencoded URI's.  The URL class can,
+    but then we run into the resolution problem.  We can later move towards
+    our own URI constructor that avoids this problem.
+
+    See <http://bugs.sun.com/bugdatabase/view_bug.do?bug_id=4708535>"
+    :failing true}
   test-fixes-java-bug-4708535
   (let [expected (as-uri "http://example.org/dir/file#foo")]
-    (is (equal? expected (resolve (as-uri "http://example.org/dir/file")
-                                  (as-uri "#foo"))))
-    (is (equal? expected (resolve (as-uri "http://example.org/dir/file#frag")
-                                  (as-uri "#foo"))))
+    (is (equal?
+          expected
+          (resolve (as-uri "http://example.org/dir/file")
+                   (as-uri "#foo"))))
+    (is (equal?
+          expected
+          (resolve (as-uri "http://example.org/dir/file#frag")
+                   (as-uri "#foo"))))
+    (is (equal?
+          expected
+          (normalize "#foo" {:base "http://example.org/dir/file"})))
+    (is (equal?
+          expected
+          (normalize "#foo" {:base "http://example.org/dir/file#frag"}))))
   (let [expected (as-uri "http://example.org/dir/file")]
-    (is (equal? expected (resolve (as-uri "http://example.org/dir/file")
-                                  (as-uri ""))))
-    (is (equal? expected (resolve (as-uri "http://example.org/dir/file#frag")
-                                  (as-uri "")))))))
+    (is (equal?
+          expected
+          (resolve (as-uri "http://example.org/dir/file")
+                   (as-uri ""))))
+    (is (equal?
+          expected
+          (resolve (as-uri "http://example.org/dir/file#frag")
+                   (as-uri ""))))
+    (is (equal?
+          expected
+          (normalize "" {:base "http://example.org/dir/file"})))
+    (is (equal?
+          expected
+          (normalize "" {:base "http://example.org/dir/file#frag"})))))
 
 (deftest
   ^{:doc "Tests from RFC3986: 6.2.2.  Syntax-Based Normalization."}
@@ -249,8 +288,6 @@
   test-percent-encoding-normalization
   (is (equal? (normalize "http://example.com/~azAZ09-._")
               (normalize "http://example.com/%7E%61%7A%41%5A%30%39%2D%2E%5F"))))
-
-(comment "From 6.2.2.3.  Path Segment Normalization")
 
 (deftest
   ^{:doc
@@ -292,6 +329,9 @@
     (is (= (f "http://www.example.com.") "www.example.com."))
     (is (= (f "http://www.example.com." {:remove-trailing-dot-in-host? true})
            "www.example.com"))
+    (is (= (f "http://example.com" {:remove-www? true}) "example.com"))
+    (is (= (f "http://www2.example.com" {:remove-www? true})
+           "www2.example.com"))
     (is (nil? (f "/")))
     (is (nil? (f "/" {:remove-trailing-dot-in-host? true})))))
 
@@ -313,7 +353,13 @@
     (is (= (f "http://example.com/") "/"))
     (is (= (f "http://example.com/foo/bar/../baz") "/foo/baz"))
     (is (= (f "http://example.com/foo/bar/../baz/") "/foo/baz/"))
-    (is (= (f "http://example.com/foo/../..") "/.."))))
+    (is (= (f "http://example.com/foo/../..") "/.."))
+    (is (= (f "http://example.com/index." {:remove-directory-index? true})
+           "/index."))
+    (is (= (f "http://example.com/index.html" {:remove-directory-index? true})
+           "/"))
+    (is (= (f "http://example.com/index.php" {:remove-directory-index? true})
+           "/"))))
 
 (deftest test-normalize-fragment-part
   (letfn [(f ([uri] (f uri *context*))
@@ -324,4 +370,33 @@
     (is (= (f "http://example.com#foo") "foo"))
     (is (= (f "http://example.com#") ""))
     (is (nil? (f "http://example.com")))
-    (is (nil? (f "http://example.com#foo" {:remove-fragment? true})))))
+    (is (nil? (f "http://example.com#foo" {:remove-fragment? true})))
+    (is (nil? (f "http://example.com/#foo"
+              {:remove-fragment? true
+               :keep-hashbang-fragment? true})))
+    (is (= (f "http://example.com/#!foo"
+              {:remove-fragment? true
+               :keep-hashbang-fragment? true})
+           "!foo"))))
+
+(deftest test-sort-and-remove-duplicate-query-key
+  ^{:doc "Fixes issue #8"}
+  (is (= (normalize "http://example.net/?a=1&b=2&a=3&A=4"
+                    {:remove-duplicate-query-keys? true
+                     :sort-query-keys? true})
+         (as-uri "http://example.net/?A=4&a=3&b=2"))))
+
+(deftest test-removes-default-port-with-mixed-case-scheme
+  ^{:doc "Fixes issue #9"}
+  (is (= (normalize "http://example.com:80/")
+         (as-uri "http://example.com/")))
+  (is (= (normalize "hTtP://example.com:80/")
+         (as-uri "http://example.com/")))
+  (is (= (normalize "https://example.com:443/")
+         (as-uri "https://example.com/")))
+  (is (= (normalize "hTtPs://example.com:443/"
+                    {:force-http? true})
+         (as-uri "http://example.com/")))
+  (is (= (normalize "https://example.com:443/"
+                    {:force-http? true})
+         (as-uri "http://example.com/"))))

@@ -1,5 +1,8 @@
 /autodoc
 /lib
 /classes
+/target
 /pom.xml
-*jar
+/pom.xml.asc
+/.lein-*
+/*.jar

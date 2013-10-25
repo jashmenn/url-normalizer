@@ -1,5 +1,4 @@
-(ns url-normalizer.test.utils
-  (:gen-class))
+(ns url-normalizer.test)
 
 (defn refer-private
   "Access private symbols of a namespace."
